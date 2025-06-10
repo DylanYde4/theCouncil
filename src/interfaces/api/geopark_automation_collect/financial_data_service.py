@@ -4,7 +4,7 @@ Servicio para procesar y almacenar datos financieros de GeoPark.
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 from src.interfaces.api.geopark_automation_collect.alpha_vantage_client import AlphaVantageClient
@@ -23,6 +23,9 @@ class FinancialDataService:
     Servicio para procesar y almacenar datos financieros.
     Utiliza Alpha Vantage para obtener datos y Vercel Blob Storage para almacenarlos.
     """
+    
+    # Ruta del archivo local para almacenar datos
+    DATA_FILE_PATH = "data/automations/geopark_financial_data.json"
     
     def __init__(self):
         """Inicializa el servicio de datos financieros."""
@@ -71,37 +74,76 @@ class FinancialDataService:
     async def get_brent_price(self) -> Dict[str, Any]:
         """
         Obtiene el precio actual del petróleo Brent.
+        Si no hay datos actuales, intenta obtener datos históricos.
         
         Returns:
             Datos del precio del Brent
         """
         try:
             logger.info("Obteniendo datos de precio del Brent desde Alpha Vantage")
-            # Obtener datos de Alpha Vantage
+            # Obtener datos de Alpha Vantage (actuales o históricos)
             brent_data = await self.alpha_vantage_client.get_brent_price()
             logger.debug(f"Datos recibidos de Alpha Vantage: {brent_data}")
             
             # Extraer los datos relevantes
-            if "Global Quote" in brent_data:
+            if "Global Quote" in brent_data and brent_data["Global Quote"].get("05. price"):
+                symbol = brent_data["Global Quote"].get("01. symbol", "BRENT")
+                
+                # Verificar si son datos históricos
+                is_historical = "source" in brent_data["Global Quote"] and "Historical" in brent_data["Global Quote"]["source"]
+                
                 price_data = {
-                    "symbol": "BRENT",
+                    "symbol": symbol,
                     "price": brent_data["Global Quote"].get("05. price", "N/A"),
                     "change": brent_data["Global Quote"].get("09. change", "N/A"),
                     "change_percent": brent_data["Global Quote"].get("10. change percent", "N/A"),
                     "timestamp": datetime.now().isoformat(),
-                    "source": "Alpha Vantage"
+                    "source": "Alpha Vantage" if not is_historical else brent_data["Global Quote"]["source"],
+                    "trading_date": brent_data["Global Quote"].get("07. latest trading day", datetime.now().strftime("%Y-%m-%d"))
                 }
                 
                 # Guardar datos en almacenamiento
                 await self._save_financial_data("brent_price", price_data)
                 
                 return price_data
+            elif "error" in brent_data:
+                # Si hay un error explícito, intentar recuperar datos previos
+                logger.warning(f"Error al obtener datos del Brent: {brent_data['error']}")
+                logger.info("Intentando recuperar datos previos almacenados")
+                
+                previous_data = await self._load_previous_data("brent_price")
+                if previous_data:
+                    logger.info(f"Usando datos previos para el precio del Brent: {previous_data.get('price')}")
+                    
+                    # Actualizar timestamp pero mantener la fuente y fecha original
+                    previous_data["timestamp"] = datetime.now().isoformat()
+                    if "source" not in previous_data:
+                        previous_data["source"] = "Alpha Vantage (from previous execution)"
+                    
+                    return previous_data
+                else:
+                    # No hay datos previos, devolver el error original
+                    return brent_data
             else:
-                logger.error(f"Datos de precio de Brent no disponibles. Respuesta: {brent_data}")
-                return {"error": "Datos de precio de Brent no disponibles"}
+                logger.error(f"Formato de datos inesperado para el Brent: {brent_data}")
+                return {"error": "Formato de datos inesperado para el Brent"}
         except Exception as e:
             logger.exception(f"Error en get_brent_price: {str(e)}")
-            return {"error": f"Error al obtener precio de Brent: {str(e)}"}
+            
+            # Intentar recuperar datos previos en caso de error
+            previous_data = await self._load_previous_data("brent_price")
+            if previous_data:
+                logger.info(f"Usando datos previos para el precio del Brent debido a un error: {previous_data.get('price')}")
+                
+                # Actualizar timestamp pero mantener la fuente original
+                previous_data["timestamp"] = datetime.now().isoformat()
+                if "source" not in previous_data:
+                    previous_data["source"] = "Alpha Vantage (from previous execution)"
+                
+                return previous_data
+            else:
+                # Si todo falla, devolver un error claro
+                return {"error": f"Error al obtener precio de Brent y no hay datos históricos disponibles: {str(e)}"}
     
     async def get_trading_volume(self, symbol: str = "GPRK") -> Dict[str, Any]:
         """
@@ -214,6 +256,46 @@ class FinancialDataService:
             logger.exception(f"Error en get_all_financial_data para {symbol}: {str(e)}")
             return {"error": f"Error al obtener todos los datos financieros: {str(e)}"}
     
+    async def _load_previous_data(self, key: str) -> Optional[Dict[str, Any]]:
+        """
+        Carga datos financieros previos desde el almacenamiento local.
+        
+        Args:
+            key: Clave para identificar los datos (ej: 'brent_price')
+            
+        Returns:
+            Datos financieros previos o None si no existen
+        """
+        try:
+            # Verificar si existe el archivo de datos
+            if os.path.exists(self.DATA_FILE_PATH):
+                logger.info(f"Buscando datos previos para '{key}' en {self.DATA_FILE_PATH}")
+                
+                # Leer el archivo
+                with open(self.DATA_FILE_PATH, 'r') as f:
+                    data = json.load(f)
+                
+                # Si el archivo contiene directamente los datos buscados
+                if isinstance(data, dict) and data.get("symbol") is not None:
+                    # Verificar si son los datos que estamos buscando
+                    if key.endswith(data.get("symbol", "")) or key == "brent_price" and data.get("symbol") in ["BRENT", "BZ", "UKOIL"]:
+                        logger.info(f"Encontrados datos previos para '{key}'")
+                        return data
+                
+                # Si el archivo contiene datos combinados (como all_financial_data)
+                if key == "brent_price" and "brent_price" in data:
+                    logger.info(f"Encontrados datos previos para 'brent_price' en datos combinados")
+                    return data["brent_price"]
+                
+                logger.warning(f"No se encontraron datos para '{key}' en el archivo")
+            else:
+                logger.warning(f"El archivo de datos {self.DATA_FILE_PATH} no existe")
+            
+            return None
+        except Exception as e:
+            logger.exception(f"Error al cargar datos previos para '{key}': {str(e)}")
+            return None
+    
     async def _save_financial_data(self, key: str, data: Dict[str, Any]) -> Optional[str]:
         """
         Guarda datos financieros en almacenamiento.
@@ -234,7 +316,7 @@ class FinancialDataService:
                 return url
             else:
                 # Guardar en archivo local
-                file_path = f"data/automations/geopark_financial_data.json"
+                file_path = self.DATA_FILE_PATH
                 logger.info(f"Guardando datos financieros en archivo local: {file_path}")
                 try:
                     with open(file_path, 'w') as f:
