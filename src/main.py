@@ -13,6 +13,8 @@ from src.interfaces.console.router import router as console_router
 from src.shared.exceptions import TheCouncilError
 from src.shared.config import get_settings
 from src.shared.logging import setup_logging
+# Importar directamente el router de GeoPark
+from src.interfaces.api.geopark_automation_collect.handlers import router as geopark_router
 
 # Set up logging
 setup_logging()
@@ -53,6 +55,8 @@ router_manager = automation_manager.router_manager
 # Include the console router for automation management
 app.include_router(console_router, prefix="/console", tags=["Console"])
 
+# Include the GeoPark router directly
+app.include_router(geopark_router)
 
 @app.on_event("startup")
 async def startup_event():
@@ -65,6 +69,9 @@ async def startup_event():
     # Store router_manager in app.state for middleware to access
     app.state.router_manager = router_manager
     logger.info("Router manager stored in app state for middleware access")
+    
+    # Log that GeoPark router has been included directly
+    logger.info(f"GeoPark router included directly with routes: {[route.path for route in geopark_router.routes]}")
 
 
 @app.on_event("shutdown")

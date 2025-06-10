@@ -2,7 +2,9 @@
 Controladores para la API de datos financieros de GeoPark.
 """
 import logging
+import traceback
 from typing import Dict, Any, Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.interfaces.api.geopark_automation_collect.financial_data_service import FinancialDataService
@@ -17,6 +19,27 @@ logger = logging.getLogger(__name__)
 def get_financial_data_service():
     """Dependencia para obtener el servicio de datos financieros."""
     return FinancialDataService()
+
+@router.get("/test")
+async def get_test():
+    """
+    Endpoint de prueba simple que no depende de servicios externos.
+    """
+    try:
+        logger.info("Ejecutando endpoint de prueba directa")
+        return {
+            "success": True,
+            "time": datetime.now().isoformat(),
+            "message": "Endpoint de prueba está funcionando correctamente",
+            "endpoint": "/api/geopark/test"
+        }
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        logger.exception(f"Error en endpoint de prueba: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={"error": f"Error en prueba: {str(e)}", "trace": error_detail}
+        )
 
 @router.get("/stock-price")
 async def get_stock_price(
@@ -42,8 +65,12 @@ async def get_stock_price(
             
         return result
     except Exception as e:
-        logger.error(f"Error al obtener precio de acción: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener precio de acción: {str(e)}")
+        error_detail = traceback.format_exc()
+        logger.exception(f"Error al obtener precio de acción: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={"error": f"Error al obtener precio de acción: {str(e)}", "trace": error_detail}
+        )
 
 @router.get("/brent-price")
 async def get_brent_price(
@@ -67,8 +94,12 @@ async def get_brent_price(
             
         return result
     except Exception as e:
-        logger.error(f"Error al obtener precio de Brent: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener precio de Brent: {str(e)}")
+        error_detail = traceback.format_exc()
+        logger.exception(f"Error al obtener precio de Brent: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={"error": f"Error al obtener precio de Brent: {str(e)}", "trace": error_detail}
+        )
 
 @router.get("/trading-volume")
 async def get_trading_volume(
@@ -94,8 +125,12 @@ async def get_trading_volume(
             
         return result
     except Exception as e:
-        logger.error(f"Error al obtener volumen de transacciones: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener volumen de transacciones: {str(e)}")
+        error_detail = traceback.format_exc()
+        logger.exception(f"Error al obtener volumen de transacciones: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={"error": f"Error al obtener volumen de transacciones: {str(e)}", "trace": error_detail}
+        )
 
 @router.get("/market-cap")
 async def get_market_cap(
@@ -121,8 +156,12 @@ async def get_market_cap(
             
         return result
     except Exception as e:
-        logger.error(f"Error al obtener capitalización de mercado: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener capitalización de mercado: {str(e)}")
+        error_detail = traceback.format_exc()
+        logger.exception(f"Error al obtener capitalización de mercado: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={"error": f"Error al obtener capitalización de mercado: {str(e)}", "trace": error_detail}
+        )
 
 @router.get("/all-data")
 async def get_all_financial_data(
@@ -148,5 +187,9 @@ async def get_all_financial_data(
             
         return result
     except Exception as e:
-        logger.error(f"Error al obtener todos los datos financieros: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al obtener todos los datos financieros: {str(e)}") 
+        error_detail = traceback.format_exc()
+        logger.exception(f"Error al obtener todos los datos financieros: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={"error": f"Error al obtener todos los datos financieros: {str(e)}", "trace": error_detail}
+        ) 

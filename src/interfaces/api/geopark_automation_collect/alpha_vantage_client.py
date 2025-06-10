@@ -21,11 +21,13 @@ class AlphaVantageClient:
     def __init__(self):
         """Inicializa el cliente de Alpha Vantage."""
         # Obtener API key de las variables de entorno o usar una por defecto
-        self.api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "demo")
+        self.api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
         
         # Si no hay API key, advertir en logs
-        if self.api_key == "demo":
-            logger.warning("Usando API key de demo para Alpha Vantage. La funcionalidad puede ser limitada.")
+        if not self.api_key:
+            logger.warning("No se encontró ALPHA_VANTAGE_API_KEY en las variables de entorno.")
+            self.api_key = "demo"  # Usar demo como último recurso
+            logger.warning("Se usará la clave 'demo' que tiene funcionalidad muy limitada (5 llamadas por minuto, 500 por día).")
     
     async def get_stock_quote(self, symbol: str = "GPRK") -> Dict[str, Any]:
         """
@@ -37,11 +39,17 @@ class AlphaVantageClient:
         Returns:
             Datos de la cotización de la acción
         """
+        logger.info(f"Solicitando cotización para {symbol}")
         params = {
             "function": "GLOBAL_QUOTE",
             "symbol": symbol,
             "apikey": self.api_key
         }
+        
+        # Registrar la URL que vamos a consultar (sin la API key)
+        safe_params = params.copy()
+        safe_params["apikey"] = "XXXXX"  # Ocultar la API key en los logs
+        logger.debug(f"URL de consulta: {self.BASE_URL} con parámetros: {safe_params}")
         
         return await self._make_request(params)
     
@@ -52,12 +60,18 @@ class AlphaVantageClient:
         Returns:
             Datos del precio del Brent
         """
+        logger.info("Solicitando precio del Brent")
         # El símbolo para Brent crude oil es generalmente BZ=F o BRENT
         params = {
             "function": "GLOBAL_QUOTE",
             "symbol": "BZ=F",  # Símbolo para Brent crude oil futures
             "apikey": self.api_key
         }
+        
+        # Registrar la URL que vamos a consultar (sin la API key)
+        safe_params = params.copy()
+        safe_params["apikey"] = "XXXXX"  # Ocultar la API key en los logs
+        logger.debug(f"URL de consulta: {self.BASE_URL} con parámetros: {safe_params}")
         
         return await self._make_request(params)
     
@@ -71,11 +85,17 @@ class AlphaVantageClient:
         Returns:
             Datos generales de la compañía
         """
+        logger.info(f"Solicitando información general para {symbol}")
         params = {
             "function": "OVERVIEW",
             "symbol": symbol,
             "apikey": self.api_key
         }
+        
+        # Registrar la URL que vamos a consultar (sin la API key)
+        safe_params = params.copy()
+        safe_params["apikey"] = "XXXXX"  # Ocultar la API key en los logs
+        logger.debug(f"URL de consulta: {self.BASE_URL} con parámetros: {safe_params}")
         
         return await self._make_request(params)
     
@@ -93,11 +113,15 @@ class AlphaVantageClient:
             Exception: Si ocurre un error durante la solicitud
         """
         try:
+            logger.debug(f"Iniciando solicitud a Alpha Vantage")
+            
             async with httpx.AsyncClient() as client:
+                # Hacer la solicitud a la API
                 response = await client.get(self.BASE_URL, params=params)
                 response.raise_for_status()  # Lanza excepción para códigos 4xx/5xx
                 
                 data = response.json()
+                logger.debug(f"Respuesta recibida de Alpha Vantage: {data}")
                 
                 # Verificar si hay un mensaje de error en la respuesta
                 if "Error Message" in data:
@@ -111,9 +135,9 @@ class AlphaVantageClient:
                 return data
                 
         except httpx.RequestError as e:
-            logger.error(f"Error en la solicitud a Alpha Vantage: {str(e)}")
+            logger.exception(f"Error en la solicitud a Alpha Vantage: {str(e)}")
             raise Exception(f"Error en la conexión con Alpha Vantage: {str(e)}")
         
         except Exception as e:
-            logger.error(f"Error inesperado con Alpha Vantage: {str(e)}")
+            logger.exception(f"Error inesperado con Alpha Vantage: {str(e)}")
             raise 
