@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
+import asyncio
 
 from src.interfaces.api.geopark_automation_collect.alpha_vantage_client import AlphaVantageClient
 
@@ -43,33 +44,101 @@ class FinancialDataService:
         Returns:
             Datos del precio de la acción
         """
-        try:
-            logger.info(f"Obteniendo datos de precio para {symbol} desde Alpha Vantage")
-            # Obtener datos de Alpha Vantage
-            quote_data = await self.alpha_vantage_client.get_stock_quote(symbol)
-            logger.debug(f"Datos recibidos de Alpha Vantage: {quote_data}")
-            
-            # Extraer los datos relevantes
-            if "Global Quote" in quote_data:
-                price_data = {
-                    "symbol": symbol,
-                    "price": quote_data["Global Quote"].get("05. price", "N/A"),
-                    "change": quote_data["Global Quote"].get("09. change", "N/A"),
-                    "change_percent": quote_data["Global Quote"].get("10. change percent", "N/A"),
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "Alpha Vantage"
-                }
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Obteniendo datos de precio para {symbol} desde Alpha Vantage (intento {retry_count + 1}/{max_retries})")
+                # Obtener datos de Alpha Vantage
+                quote_data = await self.alpha_vantage_client.get_stock_quote(symbol)
+                logger.debug(f"Datos recibidos de Alpha Vantage: {quote_data}")
                 
-                # Guardar datos en almacenamiento
-                await self._save_financial_data(f"stock_price_{symbol}", price_data)
+                # Verificar si hay mensajes informativos
+                if "Information" in quote_data:
+                    logger.info(f"Mensaje informativo de Alpha Vantage: {quote_data['Information']}")
+                    
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.info(f"Intentando recuperar datos previos para {symbol}")
+                        previous_data = await self._load_previous_data(f"stock_price_{symbol}")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para {symbol}: {previous_data.get('price')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        else:
+                            # Si no hay datos previos, continuar con el mensaje de error estándar
+                            return {
+                                "symbol": symbol,
+                                "price": "N/A",
+                                "change": "N/A",
+                                "change_percent": "N/A",
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "Alpha Vantage",
+                                "status": "information",
+                                "message": quote_data["Information"]
+                            }
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
                 
-                return price_data
-            else:
-                logger.error(f"Datos de precio no disponibles para {symbol}. Respuesta: {quote_data}")
-                return {"error": f"Datos de precio no disponibles para {symbol}"}
-        except Exception as e:
-            logger.exception(f"Error en get_stock_price para {symbol}: {str(e)}")
-            return {"error": f"Error al obtener precio de acción: {str(e)}"}
+                # Extraer los datos relevantes
+                if "Global Quote" in quote_data:
+                    price_data = {
+                        "symbol": symbol,
+                        "price": quote_data["Global Quote"].get("05. price", "N/A"),
+                        "change": quote_data["Global Quote"].get("09. change", "N/A"),
+                        "change_percent": quote_data["Global Quote"].get("10. change percent", "N/A"),
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "Alpha Vantage"
+                    }
+                    
+                    # Guardar datos en almacenamiento
+                    await self._save_financial_data(f"stock_price_{symbol}", price_data)
+                    
+                    return price_data
+                else:
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.warning(f"Datos de precio no disponibles para {symbol} después de {max_retries} intentos. Respuesta: {quote_data}")
+                        
+                        # Intentar recuperar datos previos
+                        previous_data = await self._load_previous_data(f"stock_price_{symbol}")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para {symbol}: {previous_data.get('price')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        
+                        return {"error": f"Datos de precio no disponibles para {symbol}"}
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
+                    
+            except Exception as e:
+                logger.exception(f"Error en get_stock_price para {symbol}: {str(e)}")
+                
+                # Si es el último intento, intentar recuperar datos previos
+                if retry_count == max_retries - 1:
+                    # Intentar recuperar datos previos en caso de error
+                    previous_data = await self._load_previous_data(f"stock_price_{symbol}")
+                    if previous_data:
+                        logger.info(f"Usando datos previos para {symbol} debido a un error: {previous_data.get('price')}")
+                        previous_data["timestamp"] = datetime.now().isoformat()
+                        previous_data["source"] = "Alpha Vantage (cached data)"
+                        return previous_data
+                    
+                    return {"error": f"Error al obtener precio de acción: {str(e)}"}
+                
+                # Esperar un poco antes de reintentar
+                await asyncio.sleep(1)
+                retry_count += 1
+                continue
     
     async def get_brent_price(self) -> Dict[str, Any]:
         """
@@ -79,71 +148,137 @@ class FinancialDataService:
         Returns:
             Datos del precio del Brent
         """
-        try:
-            logger.info("Obteniendo datos de precio del Brent desde Alpha Vantage")
-            # Obtener datos de Alpha Vantage (actuales o históricos)
-            brent_data = await self.alpha_vantage_client.get_brent_price()
-            logger.debug(f"Datos recibidos de Alpha Vantage: {brent_data}")
-            
-            # Extraer los datos relevantes
-            if "Global Quote" in brent_data and brent_data["Global Quote"].get("05. price"):
-                symbol = brent_data["Global Quote"].get("01. symbol", "BRENT")
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Obteniendo datos de precio del Brent desde Alpha Vantage (intento {retry_count + 1}/{max_retries})")
+                # Obtener datos de Alpha Vantage (actuales o históricos)
+                brent_data = await self.alpha_vantage_client.get_brent_price()
+                logger.debug(f"Datos recibidos de Alpha Vantage: {brent_data}")
                 
-                # Verificar si son datos históricos
-                is_historical = "source" in brent_data["Global Quote"] and "Historical" in brent_data["Global Quote"]["source"]
-                
-                price_data = {
-                    "symbol": symbol,
-                    "price": brent_data["Global Quote"].get("05. price", "N/A"),
-                    "change": brent_data["Global Quote"].get("09. change", "N/A"),
-                    "change_percent": brent_data["Global Quote"].get("10. change percent", "N/A"),
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "Alpha Vantage" if not is_historical else brent_data["Global Quote"]["source"],
-                    "trading_date": brent_data["Global Quote"].get("07. latest trading day", datetime.now().strftime("%Y-%m-%d"))
-                }
-                
-                # Guardar datos en almacenamiento
-                await self._save_financial_data("brent_price", price_data)
-                
-                return price_data
-            elif "error" in brent_data:
-                # Si hay un error explícito, intentar recuperar datos previos
-                logger.warning(f"Error al obtener datos del Brent: {brent_data['error']}")
-                logger.info("Intentando recuperar datos previos almacenados")
-                
-                previous_data = await self._load_previous_data("brent_price")
-                if previous_data:
-                    logger.info(f"Usando datos previos para el precio del Brent: {previous_data.get('price')}")
+                # Verificar si hay mensajes informativos
+                if "Information" in brent_data:
+                    logger.info(f"Mensaje informativo de Alpha Vantage: {brent_data['Information']}")
                     
-                    # Actualizar timestamp pero mantener la fuente y fecha original
-                    previous_data["timestamp"] = datetime.now().isoformat()
-                    if "source" not in previous_data:
-                        previous_data["source"] = "Alpha Vantage (from previous execution)"
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.info("Intentando recuperar datos previos almacenados para Brent")
+                        previous_data = await self._load_previous_data("brent_price")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para el precio del Brent: {previous_data.get('price')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        else:
+                            # Si no hay datos previos, continuar con el mensaje de error estándar
+                            return {
+                                "symbol": "BRENT",
+                                "price": "N/A",
+                                "change": "N/A",
+                                "change_percent": "N/A",
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "Alpha Vantage",
+                                "status": "information",
+                                "message": brent_data["Information"]
+                            }
                     
-                    return previous_data
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
+                
+                # Extraer los datos relevantes
+                if "Global Quote" in brent_data and brent_data["Global Quote"].get("05. price"):
+                    symbol = brent_data["Global Quote"].get("01. symbol", "BRENT")
+                    
+                    # Verificar si son datos históricos
+                    is_historical = "source" in brent_data["Global Quote"] and "Historical" in brent_data["Global Quote"]["source"]
+                    
+                    price_data = {
+                        "symbol": symbol,
+                        "price": brent_data["Global Quote"].get("05. price", "N/A"),
+                        "change": brent_data["Global Quote"].get("09. change", "N/A"),
+                        "change_percent": brent_data["Global Quote"].get("10. change percent", "N/A"),
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "Alpha Vantage" if not is_historical else brent_data["Global Quote"]["source"],
+                        "trading_date": brent_data["Global Quote"].get("07. latest trading day", datetime.now().strftime("%Y-%m-%d"))
+                    }
+                    
+                    # Guardar datos en almacenamiento
+                    await self._save_financial_data("brent_price", price_data)
+                    
+                    return price_data
+                elif "error" in brent_data:
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        # Si hay un error explícito, intentar recuperar datos previos
+                        logger.warning(f"Error al obtener datos del Brent: {brent_data['error']}")
+                        logger.info("Intentando recuperar datos previos almacenados")
+                        
+                        previous_data = await self._load_previous_data("brent_price")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para el precio del Brent: {previous_data.get('price')}")
+                            
+                            # Actualizar timestamp pero mantener la fuente y fecha original
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            if "source" not in previous_data:
+                                previous_data["source"] = "Alpha Vantage (from previous execution)"
+                            
+                            return previous_data
+                        else:
+                            # No hay datos previos, devolver el error original
+                            return brent_data
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
                 else:
-                    # No hay datos previos, devolver el error original
-                    return brent_data
-            else:
-                logger.error(f"Formato de datos inesperado para el Brent: {brent_data}")
-                return {"error": "Formato de datos inesperado para el Brent"}
-        except Exception as e:
-            logger.exception(f"Error en get_brent_price: {str(e)}")
-            
-            # Intentar recuperar datos previos en caso de error
-            previous_data = await self._load_previous_data("brent_price")
-            if previous_data:
-                logger.info(f"Usando datos previos para el precio del Brent debido a un error: {previous_data.get('price')}")
+                    # Si es el último intento y no hay datos útiles
+                    if retry_count == max_retries - 1:
+                        logger.error(f"Formato de datos inesperado para el Brent después de {max_retries} intentos: {brent_data}")
+                        
+                        # Intentar recuperar datos previos
+                        previous_data = await self._load_previous_data("brent_price")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para el precio del Brent: {previous_data.get('price')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        
+                        return {"error": "Formato de datos inesperado para el Brent"}
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
+                    
+            except Exception as e:
+                logger.exception(f"Error en get_brent_price: {str(e)}")
                 
-                # Actualizar timestamp pero mantener la fuente original
-                previous_data["timestamp"] = datetime.now().isoformat()
-                if "source" not in previous_data:
-                    previous_data["source"] = "Alpha Vantage (from previous execution)"
+                # Si es el último intento, intentar recuperar datos previos
+                if retry_count == max_retries - 1:
+                    # Intentar recuperar datos previos en caso de error
+                    previous_data = await self._load_previous_data("brent_price")
+                    if previous_data:
+                        logger.info(f"Usando datos previos para el precio del Brent debido a un error: {previous_data.get('price')}")
+                        
+                        # Actualizar timestamp pero mantener la fuente original
+                        previous_data["timestamp"] = datetime.now().isoformat()
+                        if "source" not in previous_data:
+                            previous_data["source"] = "Alpha Vantage (from previous execution)"
+                        
+                        return previous_data
+                    else:
+                        # Si todo falla, devolver un error claro
+                        return {"error": f"Error al obtener precio de Brent y no hay datos históricos disponibles: {str(e)}"}
                 
-                return previous_data
-            else:
-                # Si todo falla, devolver un error claro
-                return {"error": f"Error al obtener precio de Brent y no hay datos históricos disponibles: {str(e)}"}
+                # Esperar un poco antes de reintentar
+                await asyncio.sleep(1)
+                retry_count += 1
+                continue
     
     async def get_trading_volume(self, symbol: str = "GPRK") -> Dict[str, Any]:
         """
@@ -155,31 +290,97 @@ class FinancialDataService:
         Returns:
             Datos del volumen de transacciones
         """
-        try:
-            logger.info(f"Obteniendo datos de volumen para {symbol} desde Alpha Vantage")
-            # Obtener datos de Alpha Vantage
-            quote_data = await self.alpha_vantage_client.get_stock_quote(symbol)
-            logger.debug(f"Datos recibidos de Alpha Vantage: {quote_data}")
-            
-            # Extraer los datos relevantes
-            if "Global Quote" in quote_data:
-                volume_data = {
-                    "symbol": symbol,
-                    "volume": quote_data["Global Quote"].get("06. volume", "N/A"),
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "Alpha Vantage"
-                }
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Obteniendo datos de volumen para {symbol} desde Alpha Vantage (intento {retry_count + 1}/{max_retries})")
+                # Obtener datos de Alpha Vantage
+                quote_data = await self.alpha_vantage_client.get_stock_quote(symbol)
+                logger.debug(f"Datos recibidos de Alpha Vantage: {quote_data}")
                 
-                # Guardar datos en almacenamiento
-                await self._save_financial_data(f"trading_volume_{symbol}", volume_data)
+                # Verificar si hay mensajes informativos
+                if "Information" in quote_data:
+                    logger.info(f"Mensaje informativo de Alpha Vantage: {quote_data['Information']}")
+                    
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.info(f"Intentando recuperar datos previos para volumen de {symbol}")
+                        previous_data = await self._load_previous_data(f"trading_volume_{symbol}")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para volumen de {symbol}: {previous_data.get('volume')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        else:
+                            # Si no hay datos previos, continuar con el mensaje de error estándar
+                            return {
+                                "symbol": symbol,
+                                "volume": "N/A",
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "Alpha Vantage",
+                                "status": "information",
+                                "message": quote_data["Information"]
+                            }
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
                 
-                return volume_data
-            else:
-                logger.error(f"Datos de volumen no disponibles para {symbol}. Respuesta: {quote_data}")
-                return {"error": f"Datos de volumen no disponibles para {symbol}"}
-        except Exception as e:
-            logger.exception(f"Error en get_trading_volume para {symbol}: {str(e)}")
-            return {"error": f"Error al obtener volumen de transacciones: {str(e)}"}
+                # Extraer los datos relevantes
+                if "Global Quote" in quote_data:
+                    volume_data = {
+                        "symbol": symbol,
+                        "volume": quote_data["Global Quote"].get("06. volume", "N/A"),
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "Alpha Vantage"
+                    }
+                    
+                    # Guardar datos en almacenamiento
+                    await self._save_financial_data(f"trading_volume_{symbol}", volume_data)
+                    
+                    return volume_data
+                else:
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.warning(f"Datos de volumen no disponibles para {symbol} después de {max_retries} intentos. Respuesta: {quote_data}")
+                        
+                        # Intentar recuperar datos previos
+                        previous_data = await self._load_previous_data(f"trading_volume_{symbol}")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para volumen de {symbol}: {previous_data.get('volume')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        
+                        return {"error": f"Datos de volumen no disponibles para {symbol}"}
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
+                    
+            except Exception as e:
+                logger.exception(f"Error en get_trading_volume para {symbol}: {str(e)}")
+                
+                # Si es el último intento, intentar recuperar datos previos
+                if retry_count == max_retries - 1:
+                    # Intentar recuperar datos previos en caso de error
+                    previous_data = await self._load_previous_data(f"trading_volume_{symbol}")
+                    if previous_data:
+                        logger.info(f"Usando datos previos para volumen de {symbol} debido a un error: {previous_data.get('volume')}")
+                        previous_data["timestamp"] = datetime.now().isoformat()
+                        previous_data["source"] = "Alpha Vantage (cached data)"
+                        return previous_data
+                    
+                    return {"error": f"Error al obtener volumen de transacciones: {str(e)}"}
+                
+                # Esperar un poco antes de reintentar
+                await asyncio.sleep(1)
+                retry_count += 1
+                continue
     
     async def get_market_cap(self, symbol: str = "GPRK") -> Dict[str, Any]:
         """
@@ -191,34 +392,103 @@ class FinancialDataService:
         Returns:
             Datos de capitalización de mercado
         """
-        try:
-            logger.info(f"Obteniendo datos de capitalización de mercado para {symbol} desde Alpha Vantage")
-            # Obtener datos de Alpha Vantage
-            overview_data = await self.alpha_vantage_client.get_company_overview(symbol)
-            logger.debug(f"Datos recibidos de Alpha Vantage: {overview_data}")
-            
-            # Extraer los datos relevantes
-            if "MarketCapitalization" in overview_data:
-                market_cap_data = {
-                    "symbol": symbol,
-                    "market_cap": overview_data.get("MarketCapitalization", "N/A"),
-                    "name": overview_data.get("Name", symbol),
-                    "sector": overview_data.get("Sector", "N/A"),
-                    "industry": overview_data.get("Industry", "N/A"),
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "Alpha Vantage"
-                }
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Obteniendo datos de capitalización de mercado para {symbol} desde Alpha Vantage (intento {retry_count + 1}/{max_retries})")
+                # Obtener datos de Alpha Vantage
+                overview_data = await self.alpha_vantage_client.get_company_overview(symbol)
+                logger.debug(f"Datos recibidos de Alpha Vantage: {overview_data}")
                 
-                # Guardar datos en almacenamiento
-                await self._save_financial_data(f"market_cap_{symbol}", market_cap_data)
+                # Verificar si hay mensajes informativos
+                if "Information" in overview_data:
+                    logger.info(f"Mensaje informativo de Alpha Vantage: {overview_data['Information']}")
+                    
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.info(f"Intentando recuperar datos previos para capitalización de {symbol}")
+                        previous_data = await self._load_previous_data(f"market_cap_{symbol}")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para capitalización de {symbol}: {previous_data.get('market_cap')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        else:
+                            # Si no hay datos previos, continuar con el mensaje de error estándar
+                            return {
+                                "symbol": symbol,
+                                "market_cap": "N/A",
+                                "name": symbol,
+                                "sector": "N/A",
+                                "industry": "N/A",
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "Alpha Vantage",
+                                "status": "information",
+                                "message": overview_data["Information"]
+                            }
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
                 
-                return market_cap_data
-            else:
-                logger.error(f"Datos de capitalización de mercado no disponibles para {symbol}. Respuesta: {overview_data}")
-                return {"error": f"Datos de capitalización de mercado no disponibles para {symbol}"}
-        except Exception as e:
-            logger.exception(f"Error en get_market_cap para {symbol}: {str(e)}")
-            return {"error": f"Error al obtener capitalización de mercado: {str(e)}"}
+                # Extraer los datos relevantes
+                if "MarketCapitalization" in overview_data:
+                    market_cap_data = {
+                        "symbol": symbol,
+                        "market_cap": overview_data.get("MarketCapitalization", "N/A"),
+                        "name": overview_data.get("Name", symbol),
+                        "sector": overview_data.get("Sector", "N/A"),
+                        "industry": overview_data.get("Industry", "N/A"),
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "Alpha Vantage"
+                    }
+                    
+                    # Guardar datos en almacenamiento
+                    await self._save_financial_data(f"market_cap_{symbol}", market_cap_data)
+                    
+                    return market_cap_data
+                else:
+                    # Si es el último intento, intentar recuperar datos previos
+                    if retry_count == max_retries - 1:
+                        logger.warning(f"Datos de capitalización de mercado no disponibles para {symbol} después de {max_retries} intentos. Respuesta: {overview_data}")
+                        
+                        # Intentar recuperar datos previos
+                        previous_data = await self._load_previous_data(f"market_cap_{symbol}")
+                        if previous_data:
+                            logger.info(f"Usando datos previos para capitalización de {symbol}: {previous_data.get('market_cap')}")
+                            previous_data["timestamp"] = datetime.now().isoformat()
+                            previous_data["source"] = "Alpha Vantage (cached data)"
+                            return previous_data
+                        
+                        return {"error": f"Datos de capitalización de mercado no disponibles para {symbol}"}
+                    
+                    # Esperar un poco antes de reintentar
+                    await asyncio.sleep(1)
+                    retry_count += 1
+                    continue
+                    
+            except Exception as e:
+                logger.exception(f"Error en get_market_cap para {symbol}: {str(e)}")
+                
+                # Si es el último intento, intentar recuperar datos previos
+                if retry_count == max_retries - 1:
+                    # Intentar recuperar datos previos en caso de error
+                    previous_data = await self._load_previous_data(f"market_cap_{symbol}")
+                    if previous_data:
+                        logger.info(f"Usando datos previos para capitalización de {symbol} debido a un error: {previous_data.get('market_cap')}")
+                        previous_data["timestamp"] = datetime.now().isoformat()
+                        previous_data["source"] = "Alpha Vantage (cached data)"
+                        return previous_data
+                    
+                    return {"error": f"Error al obtener capitalización de mercado: {str(e)}"}
+                
+                # Esperar un poco antes de reintentar
+                await asyncio.sleep(1)
+                retry_count += 1
+                continue
     
     async def get_all_financial_data(self, symbol: str = "GPRK") -> Dict[str, Any]:
         """
